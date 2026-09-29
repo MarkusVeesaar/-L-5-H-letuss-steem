@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="et">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hääletussüsteem</title>
+<style>
+:root{--bg:#f5f7fa;--card:#fff;--ink:#1b2430;--muted:#66717f;--line:#d9dee5;--yes:#1f8a5b;--no:#c2413b;--accent:#2b4c7e}
+@media (prefers-color-scheme:dark){:root{--bg:#141a22;--card:#1d2530;--ink:#e8edf3;--muted:#93a0b0;--line:#2c3746;--yes:#3cb883;--no:#e0645d;--accent:#7fa6dc}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 Georgia,'Times New Roman',serif}
+main{max-width:720px;margin:0 auto;padding:24px 16px 48px}
+h1{font-size:1.8rem;margin:0 0 4px}
+h2{font-size:1.15rem;margin:0 0 12px}
+.sub{color:var(--muted);margin:0 0 20px}
+section{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:18px;margin-bottom:16px}
+.timer{font:600 2.4rem/1 ui-monospace,Menlo,Consolas,monospace;color:var(--accent)}
+.timer.over{color:var(--no)}
+label{display:block;margin-bottom:6px;font-weight:600}
+select,button{font:inherit;padding:10px 12px;border-radius:6px;border:1px solid var(--line);background:var(--card);color:var(--ink)}
+select{width:100%;margin-bottom:12px}
+.btns{display:flex;gap:10px}
+.btns button{flex:1;cursor:pointer;font-weight:600;color:#fff;border:0}
+#yes{background:var(--yes)}#no{background:var(--no)}
+button:disabled{opacity:.4;cursor:not-allowed}
+:focus-visible{outline:3px solid var(--accent);outline-offset:2px}
+.msg{min-height:1.5em;margin:10px 0 0}
+.msg.err{color:var(--no)}.msg.ok{color:var(--yes)}
+.bar{display:flex;height:28px;border-radius:6px;overflow:hidden;background:var(--line);margin:8px 0}
+.bar div{transition:width .3s;color:#fff;font-size:.85rem;display:flex;align-items:center;justify-content:center}
+.bar .y{background:var(--yes)}.bar .n{background:var(--no)}
+table{width:100%;border-collapse:collapse;font-size:.95rem}
+th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line)}
+th{color:var(--muted);font-weight:600}
+.wrap{overflow-x:auto}
+</style>
+</head>
+<body>
+<main>
+  <h1>Hääletussüsteem</h1>
+  <p class="sub">Hääletus kestab 5 minutit. Selle aja jooksul saad oma häält muuta.</p>
+
+  <section>
+    <h2>Aega jäänud</h2>
+    <div id="timer" class="timer">05:00</div>
+  </section>
+
+  <section>
+    <h2>Anna või muuda häält</h2>
+    <label for="voter">Hääletaja</label>
+    <select id="voter"></select>
+    <p>Sinu praegune hääl: <strong id="current">–</strong></p>
+    <div class="btns">
+      <button id="yes" type="button">Poolt</button>
+      <button id="no" type="button">Vastu</button>
+    </div>
+    <p id="msg" class="msg" role="status"></p>
+  </section>
+
+  <section>
+    <h2>Tulemused</h2>
+    <p id="counts">Hääletanud: 0 / 0 · Poolt: 0 · Vastu: 0</p>
+    <p id="winner" style="font-weight:600"></p>
+    <div class="bar" aria-hidden="true"><div class="y" id="barY"></div><div class="n" id="barN"></div></div>
+  </section>
+
+  <section>
+    <h2>Hääletajad</h2>
+    <div class="wrap"><table>
+      <thead><tr><th>Nimi</th><th>Otsus</th><th>Aeg</th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table></div>
+  </section>
+
+  <section>
+    <h2>Logi</h2>
+    <div class="wrap"><table>
+      <thead><tr><th>Aeg</th><th>Nimi</th><th>Otsus</th></tr></thead>
+      <tbody id="log"></tbody>
+    </table></div>
+  </section>
+</main>
+
+<script>
+/* ============================================================
+   ANDMEKIHT: suhtleb PHP-failidega samas kaustas
+   (voters.php, results.php, log.php, vote.php)
+   ============================================================ */
+const DURATION_MS = 5 * 60 * 1000;
+
+const api = {
+  async getVoters()  { return (await fetch('voters.php')).json(); },
+  async getResults() { return (await fetch('results.php')).json(); },
+  async getLog()     { return (await fetch('log.php')).json(); },
+  async vote(id, otsus) {
+    const r = await fetch('vote.php', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, otsus })
+    });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || 'Viga hääletamisel');
+  }
+};
+
+/* ==================== KASUTAJALIIDES ==================== */
+const $ = id => document.getElementById(id);
+const fmt = d => d ? new Date(String(d).replace(' ', 'T')).toLocaleTimeString('et-EE') : '–';
+const capital = s => s ? s[0].toUpperCase() + s.slice(1) : '–';
+let voters = [];
+let endAt = Date.now() + DURATION_MS;
+
+function say(text, kind) { const m = $('msg'); m.textContent = text; m.className = 'msg ' + (kind || ''); }
+
+async function refresh() {
+  try {
+    voters = await api.getVoters();
+    const res = await api.getResults();
+    const log = await api.getLog();
+    endAt = Number(res.start) + DURATION_MS;
+
+    const sel = $('voter'), keep = sel.value;
+    sel.innerHTML = voters.map(v => `<option value="${v.id}">${v.name}</option>`).join('');
+    if (keep) sel.value = keep;
+
+    res.haaletanud = Number(res.haaletanud); res.poolt = Number(res.poolt); res.vastu = Number(res.vastu);
+    $('counts').textContent = `Hääletanud: ${res.haaletanud} / ${res.total} · Poolt: ${res.poolt} · Vastu: ${res.vastu}`;
+    $('winner').textContent = res.poolt > res.vastu ? 'Poolt juhib'
+      : res.vastu > res.poolt ? 'Vastu juhib'
+      : (res.haaletanud ? 'Viik' : '');
+    const pct = n => res.haaletanud ? (n / res.haaletanud * 100) : 0;
+    $('barY').style.width = pct(res.poolt) + '%'; $('barY').textContent = res.poolt || '';
+    $('barN').style.width = pct(res.vastu) + '%'; $('barN').textContent = res.vastu || '';
+
+    $('rows').innerHTML = voters.map(v => `<tr><td>${v.name}</td><td>${capital(v.otsus)}</td><td>${fmt(v.aeg)}</td></tr>`).join('');
+    $('log').innerHTML = log.length
+      ? [...log].reverse().map(l => `<tr><td>${fmt(l.aeg)}</td><td>${l.name}</td><td>${capital(l.otsus)}</td></tr>`).join('')
+      : '<tr><td colspan="3">Hääli pole veel antud.</td></tr>';
+    showCurrent();
+  } catch (e) {
+    say('Andmete laadimine ebaõnnestus. Kontrolli, et PHP-failid on samas kaustas.', 'err');
+  }
+}
+
+function showCurrent() {
+  const v = voters.find(x => x.id == $('voter').value);
+  $('current').textContent = v ? capital(v.otsus) : '–';
+}
+
+async function cast(otsus) {
+  try {
+    await api.vote(Number($('voter').value), otsus);
+    say('Hääl salvestatud: ' + otsus + '.', 'ok');
+  } catch (e) { say(e.message, 'err'); }
+  refresh();
+}
+
+function tick() {
+  const left = Math.max(0, endAt - Date.now());
+  const s = Math.ceil(left / 1000);
+  $('timer').textContent = String(Math.floor(s / 60)).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0');
+  const over = left === 0;
+  $('timer').classList.toggle('over', over);
+  $('yes').disabled = $('no').disabled = over;
+  if (over) say('Hääletus on lõppenud. Tulemused on lõplikud.', 'err');
+}
+
+$('yes').onclick = () => cast('poolt');
+$('no').onclick = () => cast('vastu');
+$('voter').onchange = showCurrent;
+setInterval(tick, 500);
+setInterval(refresh, 5000);
+refresh().then(tick);
+</script>
+</body>
+</html>
